@@ -130,6 +130,10 @@ export interface DebateCoreState {
   status: string;
   error: string;
   debugMode: boolean;
+  /** Video element from current media source (null for microphone) */
+  videoElement: HTMLVideoElement | null;
+  /** Type of current media source (microphone, file, youtube, screen) */
+  mediaSourceType: string;
 }
 
 export interface DebateCoreActions {

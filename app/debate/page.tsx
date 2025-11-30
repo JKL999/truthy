@@ -4,15 +4,32 @@
 
 'use client';
 
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import { useDebateCore } from '@/app/hooks/useDebateCore';
 import SpeakerToggle from '@/app/components/SpeakerToggle';
 import LiveTranscriptDisplay from '@/app/components/LiveTranscriptDisplay';
 import VerdictCard from '@/app/components/VerdictCard';
 import DebugPanel from '@/app/components/DebugPanel';
+import MediaSourceSelector, { MediaSourceTab } from '@/app/components/MediaSourceSelector';
+import VideoOverlayContainer from '@/app/components/VideoOverlayContainer';
+import type { AudioSourceProvider } from '@/lib/audio';
+import { MicrophoneSource } from '@/lib/audio';
 
 export default function DebatePage() {
-  const { state, actions } = useDebateCore();
+  // Media source state
+  const [selectedSource, setSelectedSource] = useState<MediaSourceTab>('microphone');
+  const [audioSource, setAudioSource] = useState<AudioSourceProvider | null>(null);
+  const [showVideoOverlay, setShowVideoOverlay] = useState(true);
+  const [showSubtitles, setShowSubtitles] = useState(true);
+
+  // Initialize default microphone source
+  useEffect(() => {
+    if (!audioSource) {
+      setAudioSource(new MicrophoneSource());
+    }
+  }, [audioSource]);
+
+  const { state, actions } = useDebateCore({ audioSource: audioSource ?? undefined });
   const {
     isRecording,
     isConnectedA,
@@ -29,7 +46,24 @@ export default function DebatePage() {
     status,
     error,
     debugMode,
+    videoElement,
+    mediaSourceType,
   } = state;
+
+  // Handle source changes
+  const handleSourceReady = useCallback((provider: AudioSourceProvider) => {
+    setAudioSource(provider);
+  }, []);
+
+  // Determine if we should show video overlay (only for file/youtube/screen sources)
+  const hasVideoSource = videoElement !== null && selectedSource !== 'microphone';
+
+  // Determine if media is loading (for YouTube extraction, etc.)
+  const isMediaLoading = isRecording && (
+    status.toLowerCase().includes('connecting') ||
+    status.toLowerCase().includes('extracting') ||
+    status.toLowerCase().includes('loading')
+  );
 
 const verdictContainerRef = useRef<HTMLDivElement>(null);
 
@@ -93,6 +127,34 @@ const verdictContainerRef = useRef<HTMLDivElement>(null);
                 <span className="text-gray-400">Speaker B</span>
               </div>
 
+              {/* Overlay Toggles (only show when video source active) */}
+              {hasVideoSource && (
+                <div className="flex items-center gap-2 mr-2">
+                  <button
+                    onClick={() => setShowVideoOverlay(!showVideoOverlay)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      showVideoOverlay
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                    title="Toggle video overlay"
+                  >
+                    {showVideoOverlay ? '🎬 Video: ON' : '🎬 Video'}
+                  </button>
+                  <button
+                    onClick={() => setShowSubtitles(!showSubtitles)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      showSubtitles
+                        ? 'bg-green-600 text-white'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                    title="Toggle subtitles"
+                  >
+                    {showSubtitles ? '📝 Subs: ON' : '📝 Subs'}
+                  </button>
+                </div>
+              )}
+
               {/* Debug Mode Toggle */}
               <button
                 onClick={actions.toggleDebugMode}
@@ -112,8 +174,28 @@ const verdictContainerRef = useRef<HTMLDivElement>(null);
 
       {/* Main Content - Full Screen Transcript Display */}
       <div className="relative h-[calc(100vh-80px)]">
+        {/* Video Overlay Container (when video source is active) */}
+        {hasVideoSource && showVideoOverlay && (
+          <div className="absolute inset-0 z-20 pr-[360px] pb-[200px]">
+            <VideoOverlayContainer
+              videoElement={videoElement}
+              verdicts={verdicts}
+              currentTranscriptionA={currentTranscriptionA}
+              currentTranscriptionB={currentTranscriptionB}
+              activeSpeaker={activeSpeaker}
+              showSubtitles={showSubtitles}
+              showVerdicts={true}
+              isYouTube={selectedSource === 'youtube'}
+              isLoading={isMediaLoading}
+              loadingStatus={status || 'Preparing media...'}
+              className="h-full"
+            />
+          </div>
+        )}
+
         {/* Live Transcript Display (Center) - Add right padding to prevent overlap with verdict panel */}
-        <div className="pr-[360px]">
+        {/* Hide completely when video overlay is active */}
+        <div className={`pr-[360px] ${hasVideoSource && showVideoOverlay ? 'hidden' : ''}`}>
           <LiveTranscriptDisplay
             transcripts={transcripts}
             currentTranscriptionA={currentTranscriptionA}
@@ -125,7 +207,15 @@ const verdictContainerRef = useRef<HTMLDivElement>(null);
 
         {/* Controls (Bottom Overlay) */}
         <div className="absolute bottom-0 left-0 right-0 z-10">
-          <div className="container mx-auto px-6 pb-6">
+          <div className="container mx-auto px-6 pb-6 space-y-4">
+            {/* Media Source Selector */}
+            <MediaSourceSelector
+              selectedSource={selectedSource}
+              onSourceChange={setSelectedSource}
+              onSourceReady={handleSourceReady}
+              isRecording={isRecording}
+            />
+
             <div className="bg-gray-900/80 backdrop-blur-lg border border-gray-700/50 rounded-xl p-4 shadow-2xl">
               <div className="flex items-center justify-between">
                 {/* Left: Speaker Toggle */}

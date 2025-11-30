@@ -6,8 +6,8 @@
 'use client';
 
 import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
-import { useState, useEffect, useRef } from 'react';
-import { createBlob, decode, decodeAudioData } from '@/lib/audio';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { createBlob, decode, decodeAudioData, AudioSourceProvider, MicrophoneSource } from '@/lib/audio';
 import { Analyser } from '@/lib/analyser';
 import { Speaker, Transcript, Verdict, DebateCoreState, DebateCoreActions } from '@/types';
 
@@ -47,7 +47,12 @@ RULES:
 - If search yields insufficient evidence, return "Unverifiable"
 - Maintain strict neutrality - no opinion or policy advocacy`;
 
-export function useDebateCore() {
+export interface UseDebateCoreOptions {
+  /** Optional audio source provider. If not provided, defaults to MicrophoneSource */
+  audioSource?: AudioSourceProvider;
+}
+
+export function useDebateCore(options: UseDebateCoreOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
   const isRecordingRef = useRef(false);
   const [status, setStatus] = useState('');
@@ -65,6 +70,11 @@ export function useDebateCore() {
   const [isPlayingA, setIsPlayingA] = useState(false);
   const [isPlayingB, setIsPlayingB] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
+  const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
+  const [mediaSourceType, setMediaSourceType] = useState<string>('microphone');
+
+  // Audio source provider ref
+  const audioSourceRef = useRef<AudioSourceProvider | null>(null);
 
   const clientRef = useRef<GoogleGenAI | null>(null);
   const sessionARef = useRef<Session | null>(null);
@@ -386,40 +396,58 @@ export function useDebateCore() {
 
     if (inputAudioContextRef.current) inputAudioContextRef.current.resume();
 
-    updateStatus('Requesting microphone access...');
     sessionStartTimeRef.current = Date.now();
 
     try {
-      mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-      updateStatus('Microphone access granted. Recording...');
+      // Use provided audio source or create default MicrophoneSource
+      const audioSource = options.audioSource ?? new MicrophoneSource();
+      audioSourceRef.current = audioSource;
 
-      if (inputAudioContextRef.current && inputNodeRef.current) {
-        sourceNodeRef.current = inputAudioContextRef.current.createMediaStreamSource(
-          mediaStreamRef.current
-        );
-        sourceNodeRef.current.connect(inputNodeRef.current);
+      updateStatus(`Connecting to ${audioSource.type} source...`);
 
-        scriptProcessorNodeRef.current = inputAudioContextRef.current.createScriptProcessor(
-          256,
-          1,
-          1
-        );
-        scriptProcessorNodeRef.current.onaudioprocess = (e: AudioProcessingEvent) => {
+      // Connect the audio source with callbacks
+      await audioSource.connect({
+        onAudioData: (pcmData: Float32Array) => {
           if (!isRecordingRef.current) return;
-          const pcmData = e.inputBuffer.getChannelData(0);
 
           // Route to active speaker session (use ref to avoid closure issues)
           const activeSession = activeSpeakerRef.current === 'A' ? sessionARef.current : sessionBRef.current;
           activeSession?.sendRealtimeInput({ media: createBlob(pcmData) });
-        };
+        },
+        onStart: () => {
+          updateStatus(`${audioSource.type} source connected. Recording...`);
+        },
+        onStop: () => {
+          updateStatus(`${audioSource.type} source stopped.`);
+        },
+        onError: (err) => {
+          updateError(`${audioSource.type} error: ${err.message}`);
+        },
+        onEnded: () => {
+          // For file sources, stop recording when playback ends
+          updateStatus('Media playback ended.');
+          stopRecording();
+        },
+      });
 
-        sourceNodeRef.current.connect(scriptProcessorNodeRef.current);
-        scriptProcessorNodeRef.current.connect(inputAudioContextRef.current.destination);
-
-        setIsRecording(true);
-        isRecordingRef.current = true;
-        updateStatus(`Recording for Speaker ${activeSpeaker}...`);
+      // Get video element if available (for file/YouTube/screen sources)
+      const video = audioSource.getVideoElement();
+      if (video) {
+        setVideoElement(video);
       }
+
+      // Update media source type for UI
+      setMediaSourceType(audioSource.type);
+
+      // Connect gain node for level monitoring if available
+      const gainNode = audioSource.getGainNode();
+      if (gainNode && inputAnalyserRef.current) {
+        inputAnalyserRef.current = new Analyser(gainNode);
+      }
+
+      setIsRecording(true);
+      isRecordingRef.current = true;
+      updateStatus(`Recording for Speaker ${activeSpeaker}...`);
     } catch (err) {
       updateStatus(`Error: ${err instanceof Error ? err.message : 'Unknown'}`);
       stopRecording();
@@ -427,22 +455,78 @@ export function useDebateCore() {
   };
 
   const stopRecording = () => {
-    if (!isRecording && !mediaStreamRef.current) return;
+    // Always allow stopping - don't early return to prevent stuck state
+    console.log('[stopRecording] Called, isRecording:', isRecording, 'audioSourceRef:', !!audioSourceRef.current);
+
     setIsRecording(false);
     isRecordingRef.current = false;
 
-    if (scriptProcessorNodeRef.current && sourceNodeRef.current) {
-      scriptProcessorNodeRef.current.disconnect();
-      sourceNodeRef.current.disconnect();
+    // Close Gemini sessions to stop any ongoing transcription
+    // They will be reinitialized on next recording start
+    if (sessionARef.current) {
+      console.log('[stopRecording] Closing session A');
+      try {
+        sessionARef.current.close();
+      } catch (e) {
+        console.warn('[stopRecording] Error closing session A:', e);
+      }
+      sessionARef.current = null;
+      setIsConnectedA(false);
     }
 
-    scriptProcessorNodeRef.current = null;
-    sourceNodeRef.current = null;
+    if (sessionBRef.current) {
+      console.log('[stopRecording] Closing session B');
+      try {
+        sessionBRef.current.close();
+      } catch (e) {
+        console.warn('[stopRecording] Error closing session B:', e);
+      }
+      sessionBRef.current = null;
+      setIsConnectedB(false);
+    }
 
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
+    // Disconnect audio source provider
+    if (audioSourceRef.current) {
+      try {
+        audioSourceRef.current.disconnect();
+      } catch (e) {
+        console.warn('[stopRecording] Error disconnecting audio source:', e);
+      }
+      audioSourceRef.current = null;
+    }
+
+    // Legacy cleanup for backward compatibility
+    if (scriptProcessorNodeRef.current) {
+      try {
+        scriptProcessorNodeRef.current.disconnect();
+      } catch (e) {
+        console.warn('[stopRecording] Error disconnecting script processor:', e);
+      }
+      scriptProcessorNodeRef.current = null;
+    }
+
+    if (sourceNodeRef.current) {
+      try {
+        sourceNodeRef.current.disconnect();
+      } catch (e) {
+        console.warn('[stopRecording] Error disconnecting source node:', e);
+      }
+      sourceNodeRef.current = null;
+    }
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
+
+    // Clear video element when stopping
+    setVideoElement(null);
 
     updateStatus('Recording stopped.');
+    updateError(''); // Clear any error messages
+
+    // Reinitialize sessions for next recording
+    initSessions();
   };
 
   const reset = () => {
@@ -591,6 +675,8 @@ export function useDebateCore() {
     status,
     error,
     debugMode,
+    videoElement,
+    mediaSourceType,
   };
 
   const actions: DebateCoreActions = {
