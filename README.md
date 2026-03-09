@@ -235,7 +235,7 @@ MIT License - see LICENSE file
 
 ## Support
 
-- Issues: [GitHub Issues](https://github.com/yourusername/truthy/issues)
+- Issues: [GitHub Issues](https://github.com/JKL999/truthy/issues)
 - Docs: `docs/` folder (PRD, TDS, API.md, PROMPTS.md)
 - Demo video: [Link TBD]
 
